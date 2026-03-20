@@ -1,0 +1,9 @@
+# Core dependencies
+aiohttp>=3.8.0
+asyncpg>=0.28.0
+python-dotenv>=1.0.0
+
+# Platform-specific (install as needed)
+# discord.py>=2.3.0  # For Discord
+# python-telegram-bot  # For Telegram  
+# yowsup2  # For WhatsApp
