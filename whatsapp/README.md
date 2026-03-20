@@ -14,5 +14,5 @@ Planned integration for WhatsApp messaging platform.
 ## Usage (planned)
 ```bash
 cd whatsapp
-python3 bot.py
+python3 wabot.py
 ```
