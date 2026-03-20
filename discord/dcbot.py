@@ -95,8 +95,14 @@ class YuzukiBot(commands.Bot):
             message.content
             .replace(f"<@{self.user.id}>", "")
             .replace(f"<@!{self.user.id}>", "")
+            .replace("@yuzuki", "")
+            .replace("@Yuzuki", "")
             .strip()
         )
+
+        # Bare mention — keep mention marker so LLM knows she was just pinged
+        if not content:
+            content = message.content.strip()
 
         async with message.channel.typing():
             try:
