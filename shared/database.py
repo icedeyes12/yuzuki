@@ -133,7 +133,12 @@ class YuzukiDatabase:
             row = await conn.fetchrow(
                 "SELECT memory_json FROM users WHERE user_id = $1", user_id
             )
-            return row["memory_json"] if row and row["memory_json"] else {}
+            if not row or not row["memory_json"]:
+                return {}
+            raw = row["memory_json"]
+            if isinstance(raw, str):
+                return json.loads(raw)
+            return raw if isinstance(raw, dict) else {}
 
     async def merge_memory(self, user_id: int, new_data: Dict) -> Dict:
         """Deep merge new_data into user's memory_json. Returns merged result."""
