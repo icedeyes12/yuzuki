@@ -503,6 +503,74 @@ async def unblock_cmd(ctx, user_id: str):
         await ctx.send("Invalid user ID")
 
 
+# ============================================================
+# SLASH COMMANDS (Discord native "/")
+# ============================================================
+
+@bot.tree.command(name="help", description="Show Yuzuki help")
+async def help_slash(ctx: discord.Interactions):
+    """Slash command version of help."""
+    embed = discord.Embed(title="Yuzuki", description="Your sentient AI companion")
+    embed.add_field(name="Chat", value="@mention me or DM me", inline=False)
+    embed.add_field(name="/summarize @user", value="Generate dense memory profile (owner)", inline=False)
+    embed.add_field(name="/block @user", value="Block a user (owner)", inline=False)
+    embed.add_field(name="/unblock @user", value="Unblock a user (owner)", inline=False)
+    embed.set_footer(text=f"Owner: <@{Config.OWNER_ID}>")
+    await ctx.response.send_message(embed=embed, ephemeral=False)
+
+
+@bot.tree.command(name="summarize", description="Analyze and update a user's memory profile (owner only)")
+async def summarize_slash(ctx: discord.Interactions, user: discord.User):
+    """Slash command: generate dense memory profile for a user."""
+    if str(ctx.user.id) != Config.OWNER_ID:
+        await ctx.response.send_message("Only owner can use this.", ephemeral=True)
+        return
+
+    if user.id in bot._summarizing:
+        await ctx.response.send_message(f"⏳ Summarizing {user.name} already in progress...", ephemeral=True)
+        return
+
+    await ctx.response.send_message(f"🔄 Analyzing {user.name}...", ephemeral=True)
+    bot._summarizing.add(user.id)
+    try:
+        await bot._summarize_user(user.id)
+        await db.reset_message_count(user.id)
+        msg = await ctx.original_response()
+        await msg.edit(content=f"✅ Memory profile updated for {user.name}")
+    except Exception as e:
+        await ctx.edit_original_response(content=f"❌ Failed: {e}")
+    finally:
+        bot._summarizing.discard(user.id)
+
+
+@bot.tree.command(name="block", description="Block a user from using Yuzuki (owner only)")
+async def block_slash(ctx: discord.Interactions, user: discord.User):
+    """Slash command: block a user."""
+    if str(ctx.user.id) != Config.OWNER_ID:
+        await ctx.response.send_message("Only owner can use this.", ephemeral=True)
+        return
+
+    await db.block_user(user.id, blocked_by=ctx.user.id, reason="Manual block")
+    await ctx.response.send_message(f"✅ <@{user.id}> blocked", ephemeral=False)
+
+
+@bot.tree.command(name="unblock", description="Unblock a user (owner only)")
+async def unblock_slash(ctx: discord.Interactions, user: discord.User):
+    """Slash command: unblock a user."""
+    if str(ctx.user.id) != Config.OWNER_ID:
+        await ctx.response.send_message("Only owner can use this.", ephemeral=True)
+        return
+
+    await db.unblock_user(user.id)
+    await ctx.response.send_message(f"✅ <@{user.id}> unblocked", ephemeral=False)
+
+
+@bot.tree.command(name="ping", description="Health check")
+async def ping_slash(ctx: discord.Interactions):
+    """Slash command: ping / health check."""
+    await ctx.response.send_message("🏓 Pong!", ephemeral=True)
+
+
 def _run_bot():
     Config.validate()
     logger.info(f"Starting Yuzuki... Owner: {Config.OWNER_ID}")
