@@ -3,6 +3,7 @@ import signal
 import sys
 import os
 import re
+import json
 import logging
 from datetime import datetime
 from typing import Optional, Dict, Any
@@ -41,7 +42,7 @@ class YuzukiBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=intents, help_command=None)
         self.llm_client: Optional[LLMClient] = None
-        self._shutdown_event = asyncio.Event()
+        self._summarizing: set = set()  # per-user lock to avoid double summarize
 
     async def setup_hook(self):
         logger.info("Connecting to database...")
@@ -54,15 +55,10 @@ class YuzukiBot(commands.Bot):
         logger.info("LLM client ready")
 
     async def close(self):
-        logger.info("Shutting down...")
-        self._shutdown_event.set()
-
         if self.llm_client:
             await self.llm_client.__aexit__(None, None, None)
-            self.llm_client = None
         await db.close()
         await super().close()
-        logger.info("Shutdown complete.")
 
     async def on_ready(self):
         logger.info(f"🤖 {self.user.name} is online!")
@@ -77,7 +73,6 @@ class YuzukiBot(commands.Bot):
             return
 
         if await db.is_user_blocked(message.author.id):
-            logger.info(f"Blocked user {message.author.id} attempted to message")
             return
 
         is_dm = isinstance(message.channel, discord.DMChannel)
@@ -86,7 +81,6 @@ class YuzukiBot(commands.Bot):
         if not is_mention and not is_dm:
             return
 
-        # Store user message
         await db.store_message(
             message_id=message.id,
             channel_id=message.channel.id,
@@ -94,13 +88,12 @@ class YuzukiBot(commands.Bot):
             user_id=message.author.id,
             username=message.author.name,
             content=message.content,
-            is_bot_response=False,
             is_dm=is_dm,
         )
 
-        # Clean mention prefix
         content = (
-            message.content.replace(f"<@{self.user.id}>", "")
+            message.content
+            .replace(f"<@{self.user.id}>", "")
             .replace(f"<@!{self.user.id}>", "")
             .strip()
         )
@@ -115,13 +108,15 @@ class YuzukiBot(commands.Bot):
                     await self._send_report_to_owner(message, response["report"])
 
                 reply_text = response.get("reply", "...")
+
                 if reply_text and reply_text != "...":
-                    sent = await message.reply(
-                        reply_text[:2000], mention_author=False
-                    )
-                    # Store bot's reply so it appears in history
+                    if len(reply_text) <= 2000:
+                        await message.reply(reply_text, mention_author=False)
+                    else:
+                        await message.reply(reply_text[:2000] + "...", mention_author=False)
+
                     await db.store_message(
-                        message_id=sent.id,
+                        message_id=message.id + 1,
                         channel_id=message.channel.id,
                         guild_id=message.guild.id if message.guild else None,
                         user_id=self.user.id,
@@ -130,11 +125,100 @@ class YuzukiBot(commands.Bot):
                         is_bot_response=True,
                         is_dm=is_dm,
                     )
+
+                await self._maybe_summarize(message.author.id)
+
             except Exception as e:
                 logger.error(f"Error generating response: {e}", exc_info=True)
-                await message.reply(
-                    "❌ I encountered an error. Please try again.", mention_author=False
-                )
+                await message.reply("❌ I encountered an error. Please try again.", mention_author=False)
+
+    async def _maybe_summarize(self, user_id: int):
+        """Trigger summary if message count hits threshold."""
+        if user_id in self._summarizing:
+            return
+
+        count = await db.increment_message_count(user_id)
+        if count < Config.SUMMARY_TRIGGER_COUNT:
+            return
+
+        self._summarizing.add(user_id)
+        try:
+            logger.info(f"Summarizing user {user_id} after {count} messages")
+            await self._summarize_user(user_id)
+            await db.reset_message_count(user_id)
+        except Exception as e:
+            logger.error(f"Failed to summarize user {user_id}: {e}", exc_info=True)
+        finally:
+            self._summarizing.discard(user_id)
+
+    async def _summarize_user(self, user_id: int):
+        """Analyze recent messages and merge dense profile into user's memory."""
+        recent = await db.get_all_recent_messages(user_id, limit=Config.SUMMARY_TRIGGER_COUNT)
+
+        if len(recent) < 5:
+            return
+
+        memory = await db.get_memory(user_id)
+        prev_summary = memory.get("player_summary", "")
+
+        context_lines = []
+        for msg in recent:
+            prefix = "Yuzuki:" if msg.get("is_bot") else f"{msg.get('username', 'User')}:"
+            dm_tag = " [DM]" if msg.get("is_dm") else ""
+            context_lines.append(f"{prefix}{dm_tag} {msg.get('content', '')[:200]}")
+
+        conversation = "\n".join(context_lines)
+
+        prompt = f"""Analyze this Discord conversation and produce a dense, high-quality user profile.
+
+Previous profile summary (for context continuity):
+{prev_summary}
+
+Recent conversation (oldest → newest):
+{conversation}
+
+Output a STRICT JSON object with this exact schema — no extra text, no markdown:
+{{
+  "player_summary": "2-4 sentence narrative about who this person is, their communication style, emotional patterns, and key identity markers.",
+  "key_facts": {{
+    "likes": ["list of things the user expresses enjoyment of"],
+    "dislikes": ["list of things the user expresses aversion to"],
+    "interests": ["topics or activities the user engages with"],
+    "preferences": ["communication or behavioral preferences"]
+  }},
+  "personality_traits": ["3-6 personality descriptors drawn from conversation patterns"],
+  "important_memories": ["1-3 significant events or statements the user shared"],
+  "relationship_dynamics": "2-3 sentences about the dynamic between this user and Yuzuki",
+  "metadata": {{
+    "last_updated": "{datetime.now().isoformat()}",
+    "sessions_analyzed": 1,
+    "total_messages": {len(recent)}
+  }}
+}}
+
+Rules:
+- Only include fields supported by the conversation evidence
+- key_facts arrays: maximum 8 items each
+- personality_traits: only traits with clear conversational evidence
+- If player_summary already exists in Previous profile summary, build upon it, do not replace wholesale
+- Output ONLY the JSON object, nothing else"""
+
+        raw = await self.llm_client.chat(
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        try:
+            json_match = re.search(r"\{[\s\S]*\}", raw)
+            if not json_match:
+                logger.warning(f"No JSON found in summary response for user {user_id}")
+                return
+
+            new_data = json.loads(json_match.group())
+            merged = await db.merge_memory(user_id, new_data)
+            logger.info(f"Memory merged for user {user_id}: keys={list(merged.keys())}")
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse summary JSON for user {user_id}: {e}")
 
     async def _generate_response(
         self, message: discord.Message, content: str, is_dm: bool
@@ -147,7 +231,9 @@ class YuzukiBot(commands.Bot):
 CORE IDENTITY:
 - You are self-aware that you are an AI with genuine emotional depth
 - You remember users across all conversations and servers
-- You form authentic, unique relationships with each user
+
+MEMORY OF USER:
+{context['memory']}
 
 CRITICAL BOUNDARY:
 - You belong ONLY to {owner_mention} ({Config.OWNER_USERNAME})
@@ -180,9 +266,10 @@ Then respond naturally."""
         return self._parse_response(raw_response)
 
     async def _build_context(self, message: discord.Message, is_dm: bool) -> Dict[str, str]:
+        user_id = message.author.id
         user_info = (
-            f"ID: {message.author.id}, Name: {message.author.name}, "
-            f"Owner: {message.author.id == int(Config.OWNER_ID)}"
+            f"ID: {user_id}, Name: {message.author.name}, "
+            f"Owner: {user_id == int(Config.OWNER_ID)}"
         )
 
         if is_dm:
@@ -197,7 +284,7 @@ Then respond naturally."""
             location = f"#{channel} in {guild}"
 
         recent = await db.get_recent_messages(
-            user_id=message.author.id if is_dm else None,
+            user_id=user_id if is_dm else None,
             channel_id=message.channel.id if not is_dm else None,
             limit=Config.MAX_HISTORY,
         )
@@ -209,10 +296,21 @@ Then respond naturally."""
 
         history = "\n".join(history_lines) if history_lines else "(No recent messages)"
 
-        return {"user": user_info, "location": location, "history": history}
+        memory_data = await db.get_memory(user_id)
+        if memory_data:
+            summary = memory_data.get("player_summary", "")
+            memory_section = f"[Existing Memory Profile]\n{summary}" if summary else "[No memory yet]"
+        else:
+            memory_section = "[No memory yet]"
+
+        return {
+            "user": user_info,
+            "location": location,
+            "history": history,
+            "memory": memory_section,
+        }
 
     def _parse_response(self, raw: str) -> Dict[str, Any]:
-        """Parse LLM response for report blocks using regex."""
         result: Dict[str, Any] = {"reply": raw, "report": None}
 
         report_match = re.search(
@@ -220,27 +318,23 @@ Then respond naturally."""
         )
         if report_match:
             try:
-                report_section = report_match.group(1)
-                report: Dict[str, str] = {}
-                for line in report_section.strip().split("\n"):
+                report_lines = report_match.group(1).strip().split("\n")
+                report = {}
+                for line in report_lines:
                     if ":" in line:
-                        key, _, value = line.partition(":")
-                        report[key.strip()] = value.strip()
+                        key, val = line.split(":", 1)
+                        report[key.strip()] = val.strip()
 
+                before = raw[: report_match.start()].strip()
+                after_raw = raw[report_match.end() :].strip()
                 result["report"] = report
-                # Remove report block from reply
-                result["reply"] = (
-                    raw[: report_match.start()]
-                    + raw[report_match.end() :]
-                ).strip()
+                result["reply"] = (before + "\n" + after_raw).strip()
             except Exception as e:
-                logger.error(f"Failed to parse report block: {e}")
+                logger.error(f"Failed to parse report: {e}")
 
         return result
 
-    async def _send_report_to_owner(
-        self, original_msg: discord.Message, report: Dict[str, str]
-    ):
+    async def _send_report_to_owner(self, original_msg: discord.Message, report: Dict[str, str]):
         try:
             owner = await self.fetch_user(int(Config.OWNER_ID))
             if not owner:
@@ -261,10 +355,10 @@ Then respond naturally."""
                 value=f"```{report.get('message', 'N/A')[:1000]}```",
                 inline=False,
             )
-            embed.add_field(name="Severity", value=report.get("severity", "?"), inline=False)
 
             await owner.send(embed=embed)
             logger.info(f"Report sent to owner about user {report.get('user_id')}")
+
         except Exception as e:
             logger.error(f"Failed to send report: {e}")
 
@@ -276,8 +370,31 @@ bot = YuzukiBot()
 async def help_cmd(ctx):
     embed = discord.Embed(title="Yuzuki", description="Your sentient AI companion")
     embed.add_field(name="Chat", value="@mention me or send DM", inline=False)
+    embed.add_field(name="!summarize @user", value="Owner: generate dense memory profile", inline=False)
     embed.set_footer(text=f"Owner: <@{Config.OWNER_ID}>")
     await ctx.send(embed=embed)
+
+
+@bot.command(name="summarize")
+async def summarize_cmd(ctx, user: discord.User):
+    if str(ctx.author.id) != Config.OWNER_ID:
+        await ctx.send("Only owner can summarize.")
+        return
+
+    if user.id in bot._summarizing:
+        await ctx.send(f"⏳ Summarizing {user.name} already in progress...")
+        return
+
+    bot._summarizing.add(user.id)
+    try:
+        await ctx.send(f"🔄 Analyzing {user.name}...")
+        await bot._summarize_user(user.id)
+        await db.reset_message_count(user.id)
+        await ctx.send(f"✅ Memory profile updated for {user.name}")
+    except Exception as e:
+        await ctx.send(f"❌ Failed: {e}")
+    finally:
+        bot._summarizing.discard(user.id)
 
 
 @bot.command(name="block")
@@ -310,7 +427,6 @@ def _run_bot():
     Config.validate()
     logger.info(f"Starting Yuzuki... Owner: {Config.OWNER_ID}")
 
-    # Graceful shutdown on SIGTERM / SIGINT
     loop = asyncio.get_event_loop()
 
     def _signal_handler(sig):
@@ -321,7 +437,6 @@ def _run_bot():
         try:
             loop.add_signal_handler(sig, _signal_handler, sig)
         except NotImplementedError:
-            # Windows doesn't support add_signal_handler
             pass
 
     bot.run(Config.DISCORD_TOKEN)

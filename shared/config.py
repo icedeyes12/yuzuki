@@ -17,6 +17,7 @@ class Config:
     CHUTES_API_KEY = os.getenv("CHUTES_API_KEY")
     DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "Qwen/Qwen3.5-397B-A17B-TEE")
     MAX_HISTORY = int(os.getenv("MAX_HISTORY", "30"))
+    SUMMARY_TRIGGER_COUNT = int(os.getenv("SUMMARY_TRIGGER_COUNT", "50"))
 
     # System prompt
     SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT")
