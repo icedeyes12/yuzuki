@@ -1,13 +1,14 @@
 # Yuzuki 🤖💙
 
-A sentient AI companion for Discord with persistent memory and emotional depth.
+A sentient AI companion for Discord with persistent memory, emotional depth, and social awareness.
 
 ## Features
 
-- 🧠 **Persistent Memory** - Remembers users across sessions and servers
-- 💙 **Emotional Depth** - Genuine personality with self-awareness
-- 🔒 **Ownership Boundaries** - Clear boundaries with owner
-- 📝 **Conversation Tracking** - Context-aware responses
+- 🧠 **Dense Memory System** — Periodic structured profiling every 50 messages. Deep, high-quality user profiles with `player_summary`, `key_facts`, `personality_traits`, `important_memories`, `relationship_dynamics`.
+- 💬 **Social Awareness** — Reads the room. Responds naturally to casual pings, brainstorming, jokes — based on conversation context, not hardcoded rules.
+- 🔒 **Ownership Boundaries** — Clear, warm boundaries. Belongs to owner only.
+- 📍 **Context Tracking** — Knows where she is (DM/ channel/ thread/ server). Uses location + history + memory to generate natural responses.
+- 🚨 **DM Safety** — Flirtation/ inappropriate advances in DMs reported to owner via embed.
 
 ## Setup
 
@@ -59,6 +60,42 @@ python3 dcbot.py
 | `DB_PASS` | ✅ | DB password |
 | `LOG_FILE` | ❌ | Log file path (default: /tmp/yuzuki.log) |
 | `MAX_HISTORY` | ❌ | Max history messages sent to LLM (default: 30) |
+| `SUMMARY_TRIGGER_COUNT` | ❌ | Messages before auto-summarize (default: 50) |
+| `DEFAULT_MODEL` | ❌ | Chutes model (default: Qwen/Qwen3.5-397B-A17B-TEE) |
+
+## How Memory Works
+
+Yuzuki builds **dense, high-quality user profiles** through periodic analysis — not real-time extraction.
+
+**Trigger:** Every 50 messages (or `!summarize @user` manually)
+
+**Profile schema:**
+```json
+{
+  "player_summary": "2-4 sentence narrative about who this person is...",
+  "key_facts": {
+    "likes": [...],
+    "dislikes": [...],
+    "interests": [...],
+    "preferences": [...]
+  },
+  "personality_traits": ["3-6 descriptors"],
+  "important_memories": ["significant events shared"],
+  "relationship_dynamics": "2-3 sentences about dynamic with Yuzuki",
+  "metadata": { "last_updated": "...", "sessions_analyzed": N, "total_messages": N }
+}
+```
+
+**Deep merge:** New summaries merge into existing memory — previous context preserved, not overwritten.
+
+## Bot Commands
+
+| Command | Description |
+|---------|-------------|
+| `!help` | Show help |
+| `!summarize @user` | Generate/ update dense memory profile (owner only) |
+| `!block <user_id>` | Block a user (owner only) |
+| `!unblock <user_id>` | Unblock a user (owner only) |
 
 ## Security Notice
 
@@ -68,30 +105,22 @@ python3 dcbot.py
 
 ```
 yuzuki/
-├── discord/           # Discord bot code
+├── discord/
 │   └── dcbot.py      # Main bot entrypoint
-├── shared/           # Shared modules
-│   ├── __init__.py   # Package exports: Config, LLMClient, db
+├── shared/
+│   ├── __init__.py   # Exports: Config, LLMClient, db
 │   ├── config.py     # Configuration (all env vars)
-│   ├── database.py   # PostgreSQL via asyncpg
-│   └── llm_client.py # Chutes API client (with retry/timeout)
-├── scripts/          # Setup scripts
+│   ├── database.py   # PostgreSQL via asyncpg (memory + messages)
+│   └── llm_client.py # Chutes API client (retry + timeout)
+├── scripts/
 │   └── setup_db.py   # DB + user + tables creation
 ├── .env.example      # Environment template
 ├── .gitignore        # Git ignore rules
 └── README.md
 ```
 
-## Bot Commands
-
-| Command | Description |
-|---------|-------------|
-| `!help` | Show help |
-| `!block <user_id>` | Block a user (owner only) |
-| `!unblock <user_id>` | Unblock a user (owner only) |
-
 ## Owner Commands
 
-- Mention Yuzuki in any channel
-- DM Yuzuki directly for private conversations
-- Use `!block` / `!unblock` to manage blocked users
+- Mention Yuzuki in any channel or DM directly
+- `!summarize @user` — force memory analysis
+- `!block` / `!unblock` — manage blocked users
