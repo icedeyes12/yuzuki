@@ -97,8 +97,6 @@ class YuzukiBot(commands.Bot):
             .replace(f"<@!{self.user.id}>", "")
             .strip()
         )
-        if not content:
-            content = "Hello"
 
         async with message.channel.typing():
             try:
